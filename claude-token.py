@@ -38,7 +38,20 @@ def session_tty():
     with ENXIO), but the `claude` process itself sits on the Ghostty pty —
     walk up the ancestor chain and take the first real tty."""
     pid = os.getppid()
-    for _ in range(10):
+    seen = set()
+    for _ in range(64):
+        if pid in seen:
+            return None
+        seen.add(pid)
+
+        for fd in ("1", "2", "0"):
+            try:
+                path = os.readlink(f"/proc/{pid}/fd/{fd}")
+            except OSError:
+                continue
+            if path.startswith("/dev/pts/") or path.startswith("/dev/tty"):
+                return path
+
         try:
             out = subprocess.run(["ps", "-o", "ppid=,tty=", "-p", str(pid)],
                                  capture_output=True, text=True, timeout=1).stdout.split()
@@ -47,7 +60,7 @@ def session_tty():
         if len(out) < 2:
             return None
         if out[1] != "??":
-            return "/dev/" + out[1]
+            return out[1] if out[1].startswith("/dev/") else "/dev/" + out[1]
         if not out[0].isdigit() or int(out[0]) <= 1:
             return None
         pid = int(out[0])
@@ -60,7 +73,7 @@ def emit(seq):
     try:
         with open("/dev/tty", "wb") as tty:
             tty.write(seq)
-        return
+        return True
     except OSError:
         pass
     path = session_tty()
@@ -68,25 +81,33 @@ def emit(seq):
         try:
             with open(path, "wb") as tty:
                 tty.write(seq)
+            return True
         except OSError:
             pass  # headless / tty gone -> nothing to drive
+    return False
 
 
-def apply(level):
+def apply(level, mirror_stdout=False):
     """Encode the level into the cursor color via OSC 12. The shader trusts a
     color only when the base nibbles and a 4-bit checksum line up (16 bits),
     so a theme's own cursor color can't accidentally drive the hole.
     Negative level -> OSC 112 resets the cursor color to the theme's own,
     which the shader reads as "no session"."""
     if level < 0.0:
-        emit(b"\033]112\007")
+        seq = b"\033]112\007"
+        emit(seq)
+        if mirror_stdout:
+            sys.stdout.buffer.write(seq)
         return
     fill = max(0, min(250, int(round(level * 250.0))))
     hi, lo = fill >> 4, fill & 0xF
     rgb = (CURSOR_BASE[0] | (hi ^ lo ^ 0x5),
            CURSOR_BASE[1] | hi,
            CURSOR_BASE[2] | lo)
-    emit(b"\033]12;#%02x%02x%02x\007" % rgb)
+    seq = b"\033]12;#%02x%02x%02x\007" % rgb
+    emit(seq)
+    if mirror_stdout:
+        sys.stdout.buffer.write(seq)
 
 
 def context_fill(data):
@@ -190,8 +211,8 @@ def main():
     # instead of creeping every refresh (steadiness only — no perf effect,
     # the shader redraws every frame either way).
     level = round(context_fill(data) * 100.0) / 100.0
-    apply(level)
-    print(status_line(data, level))
+    apply(level, mirror_stdout=True)
+    sys.stdout.buffer.write(status_line(data, level).encode("utf-8", "replace") + b"\n")
 
 
 if __name__ == "__main__":

@@ -10,47 +10,60 @@ you pick: a built-in *pomodoro* clock (grow through the hour, demand a break,
 leave you alone once you take it), or *token mode*, where it tracks how full
 **Claude Code's context window** is in real time.
 
-Modeled on [Eric Bruneton's black hole shader](https://ebruneton.github.io/black_hole_shader/),
-which beam-traces Schwarzschild geodesics against precomputed lookup tables.
+Modeled on [Eric Bruneton's black hole shader](https://ebruneton.github.io/black_hole_shader/).
 A Ghostty custom shader is a single Shadertoy-style fragment pass with no
-custom textures, so the lookup tables are replaced by doing the physics live:
-every pixel near the hole **integrates its own null geodesic** through the
-Schwarzschild metric (the Binet-form acceleration `a = -3/2 h² x/r⁵`, which
-gives the exact photon bending). Your terminal contents play the role of the
-lensed background sky. Nothing below is painted on — it all falls out of the
-ray tracing:
+lookup textures, so every near-field pixel integrates its own light path live.
+The exact planar Schwarzschild term is augmented with the leading
+gravitomagnetic field of a rapidly spinning mass (`BH_SPIN`), giving a stable
+Kerr-inspired approximation with frame dragging, a spin-dependent horizon and
+ISCO, and asymmetric lensing. Your terminal contents are the background sky.
 
 ## What it renders
 
-- **The shadow** — rays with impact parameter under `b_crit = (3√3/2) r_s`
-  spiral through the horizon and come back black. Text near the edge is
-  stretched into the photon ring before it disappears; text behind the hole
-  really is gone.
+- **The shadow** — the exact Kerr radial photon potential decides whether a
+  screen ray has an exterior turning point or is captured. This keeps the
+  silhouette clean, spin-shifted, and correctly non-circular even though the
+  live path integrator uses a faster Kerr-inspired approximation. The
+  potential minimum is solved analytically from its stationary points rather
+  than sampled, so narrow near-extremal escape wells are not missed.
 - **Gravitational lensing** — escaped rays are projected back onto the
   terminal "sky" plane: text bends, magnifies, and shows the mirrored
   secondary image inside the Einstein ring. Far from the hole this hands off
-  to the analytic weak-field deflection (`α = 2r_s/b`), so only pixels near
-  the hole pay for the integration. Blue bends slightly more than red out
-  there for a touch of chromatic aberration.
-- **Accretion disk** — a thin Keplerian disk that a ray can pierce several
-  times: the far side arcs *over and under* the shadow (the Interstellar
-  look), and the photon-ring region shows higher-order disk images.
-  Coloring is physical: a Shakura–Sunyaev temperature profile rendered as
-  blackbody color, shifted and beamed by the relativistic factor
-  `g = √(1 − 1.5 r_s/r)/(1 − β·k̂)` — the approaching side is blue-hot and
-  boosted by `g^N`, the receding side dim and red.
+  to achromatic weak-field deflection plus a tangential spin correction, so
+  only pixels near the hole pay for integration.
+- **Accretion disk** — a finite-height, optically participating disk rather
+  than an infinitely thin painted plane. Rays integrate emission and
+  absorption along their path through layered, orbitally sheared turbulence;
+  the far side arcs *over and under* the shadow and the photon region contains
+  higher-order disk images. A Shakura–Sunyaev temperature profile is converted
+  along the CIE blackbody locus into linear sRGB, shifted with the circular
+  Kerr emitter redshift, weighted by a fitted Planck/CIE visible-power
+  fraction, transported with the bolometric `g⁴` law, and then filmically
+  tonemapped.
+- **Disk structure** — the fine turbulence is domain-warped by a second,
+  coarser noise field (`DISK_WARP_STRENGTH`) for swirling, marbled density
+  instead of clean concentric bands; hot filaments are ridge-shaped
+  (`DISK_FILAMENT_SHARPNESS`) into crisp streak lines rather than blobby
+  patches; and a low-frequency spiral density wave (`DISK_ARM_COUNT`,
+  `DISK_ARM_TWIST`, `DISK_ARM_SHARPNESS`, `DISK_ARM_STRENGTH`) is layered on
+  top so the disk reads as galaxy-like structure, not uniform noise — the
+  arm pattern rotates at its own, slower rate than the fine turbulence.
 - **Photon ring** — rays winding near the `1.5 r_s` photon sphere pick up
   every disk crossing; the bright thin ring is emergent, not drawn.
-- **Lensed starfield** — a faint procedural sky sampled with the *bent* ray
-  direction, so stars smear into arcs around the hole (off by default —
-  raise `STAR_GAIN` to enable).
+- **Lensed starfield** — a fixed procedural sky is sampled at the same
+  unmirrored sky-plane hit as the terminal, so stars split into arcs and
+  secondary images without swimming as the hole moves.
 - **Gravitational time dilation** — the disk pattern at radius `r` advances
-  at the proper rate `√(1 − 1.5 r_s/r)`, so the inner orbits visibly freeze;
-  the whole disk also winds down as the hole grows heavier (`DILATION_MIN`).
+  with the circular Kerr angular velocity; the whole pattern also winds down
+  as the hole grows heavier (`DILATION_MIN`).
 - The hole drifts on a slow Lissajous path, confined to the upper part of
   the screen — the bottom `WORK_AREA` fraction (your prompt) is never
   distorted. Drift speed and reach follow its size: small and calm, big
   and restless.
+- **Quality tiers** — maximum quality uses 128 adaptive geodesic steps, four
+  turbulence octaves, and 2x2 linear-radiance supersampling on the exact Kerr
+  shadow edge. Balanced and lightweight compile-time fallbacks are available
+  near the top of the shader.
 
 ## Pomodoro mode
 
@@ -59,7 +72,8 @@ shell hooks, nothing outside `blackhole.glsl`.
 
 Shaders are stateless (no buffers persist between frames, and Ghostty has no
 custom uniforms), so a shader cannot remember when *your* work streak began.
-Instead the schedule is anchored to the wall clock via `iDate`:
+The schedule uses the wall clock via `iDate` when available and otherwise
+falls back to Ghostty's session clock (`iTime`):
 
 - **Cycle**: the hole is always present while you work — it starts small at
   the cycle floor, grows over `WORK_PERIOD_MIN` (default 55 min), collapses
@@ -71,28 +85,24 @@ Instead the schedule is anchored to the wall clock via `iDate`:
   shrinks live, gone entirely after a few minutes of quiet — it never nags
   while you aren't actually working.
 
-The trade-off of self-containment: the cycle won't re-anchor to a break you
-take at an odd time — it's an hourly bell, not a per-streak stopwatch.
-
-> **Caveat:** stock Ghostty (through 1.3) declares `iDate` but never
-> populates it — it is always zero — so on current releases the wall-clock
-> schedule doesn't advance: the hole sits at its small cycle-floor size and
-> only the typing detector works. The full cycle comes alive once Ghostty
-> wires `iDate` up (you can preview it today with `TIME_SCALE`, which runs
-> off `iTime` instead). Token mode, the default, is unaffected.
+The trade-off of self-containment: with a real `iDate` it is an hourly bell,
+not a per-streak stopwatch. Stock Ghostty through 1.3 declares `iDate` but
+leaves it at zero, so the fallback starts a fresh session-relative cycle when
+the renderer starts. `TIME_SCALE` accelerates either clock for testing. Token
+mode, the default, is unaffected.
 
 ## Size modes
 
 What drives the hole is selected by `SIZE_MODE` near the top of `blackhole.glsl`:
 
-- `MODE_POMODORO` — the self-contained wall-clock schedule described above. Works
-  standalone, no setup beyond the shader (but see the `iDate` caveat above).
+- `MODE_POMODORO` — the self-contained wall/session-clock schedule described
+  above. Works standalone, with no setup beyond the shader.
 - `MODE_TOKENS` *(default)* — the hole tracks **Claude Code's context-window
   fill**. Requires the bundled command (below).
 - `MODE_DEMO` — a self-running **42-second showcase loop** for recording demos:
   the hole grows from the corner seed to 100 % exactly as token mode would,
-  while the disk look tours the tuner presets (Inferno → Gargantua → M87* donut
-  → Face-on ember → Quasar → Blazar → Pure lens → Inferno), crossfading at each
+  while the disk look tours the tuner presets (Layered → Gargantua → M87* donut
+  → Face-on ember → Quasar → Blazar → Pure lens → Layered), crossfading at each
   ~5 s slot boundary. Everything runs off `iTime` inside one compiled shader —
   no reloads, so a recording never hitches. Toggle it with `./demo-mode.sh
   on|off` (which also reloads Ghostty); the cursor channel is ignored in demo
@@ -100,24 +110,53 @@ What drives the hole is selected by `SIZE_MODE` near the top of `blackhole.glsl`
   cycle — the loop restart is obvious (the hole snaps back to the corner
   seed).
 
+### Unfocused feeding
+
+Token mode is deliberately silent while the terminal is focused — no ambient
+corner hole, just your plain terminal, however full Claude's context window
+gets. Look away and that changes: focus protects the lower `WORK_AREA` so the
+prompt stays readable, and losing focus opens that shield, moves the hole to
+the terminal center, and reveals its hunger while dragging and darkening
+nearby glyphs (below). Ghostty exposes the timestamp when focus was last
+*gained*, but no blur timestamp; a stateless shader therefore cannot start an
+exact timer at focus loss. Hunger accumulates invisibly during the focus
+session and is revealed when you look away: a quick glance shows a small,
+still-growing hole, while looking away after a long session reveals a mature
+one immediately. It requires `custom-shader-animation = always`.
+
+`UNFOCUSED_GROW_EASE` shapes that focus-session hunger curve. The feeding
+center then wanders on the same Lissajous roam the rest of the shader uses
+(`UNFOCUSED_ROAM_RADIUS`/`UNFOCUSED_ROAM_SPEED`), so the revealed hole visibly
+drifts rather than sitting still.
+
+The cap and the growth window both track how full Claude's context window
+is, *live* — so a session that keeps growing while you're tabbed away makes
+the hole hungrier in real time:
+
+| Context fill | Feed cap (radius) | Hunger window |
+|---|---|---|
+| 0% / no session | `UNFOCUSED_END_RADIUS` (36%) | `UNFOCUSED_GROW_SEC` (40s) |
+| 100% | `UNFOCUSED_HUNGRY_END_RADIUS` (65%) | `UNFOCUSED_HUNGRY_GROW_SEC` (3.5s) |
+
+**Eating the text.** Near the hole, glyphs don't just fade in place — the
+terminal is sampled at a position spiraled and dragged toward the hole
+center instead of straight ahead, so text visibly stretches and spirals
+inward before it's swallowed and fades to black. Both the drag
+(`UNFOCUSED_PULL_MIN`/`MAX`) and the twist (`UNFOCUSED_SWIRL_MIN`/`MAX`)
+strengthen the longer the hole has been feeding, within a band around the
+shadow (`UNFOCUSED_PULL_INNER`/`OUTER`, in shadow radii).
+
 ### Token mode
 
-The hole reflects how full Claude's context window is, *live*:
+While focused, the hole is completely absent — Claude's context fill only
+becomes visible once you unfocus, through the feeding behavior above:
 
-- **Empty context** — a small hole in the **top-right corner**, sized to
-  cover `TOKEN_AREA_MIN` (default **0.06 %**) of the terminal area — the same
-  felt size on any window shape.
-- **Filling up** — it grows toward `TOKEN_AREA_MAX` (default **~3 %** of the
-  terminal at 100 % context — that's the *shadow*; the bright disk reaches
-  ~3× past it, so it reads far bigger), moves **faster**, and its allowed roam box
-  expands out of the corner — left and down — until it covers the whole
-  playable screen above the work area; the hole wanders pseudo-randomly
-  through all of it. The orbit is scaled to the box (never clipped —
-  clipping would park it dead at the boundary), with margins that keep the
-  shadow and bright inner disk on screen while it's small.
-- **`/compact` or a new session** — snaps back to the corner seed.
-- **No Claude session running** — the hole disappears entirely; you get a plain
-  terminal.
+- **Focused** — plain terminal, always, session or not.
+- **Unfocused, live session** — the feeding hole appears at center; how big
+  it gets and how fast is driven by the context fill, live (see the hunger
+  table above).
+- **Unfocused, no session** — `TOKEN_LEVEL` still drives the fallback fill
+  used for hunger; `-1` means no hunger boost (today's fixed feed).
 
 #### How it works
 
@@ -193,8 +232,11 @@ or `~/Library/Application Support/com.mitchellh.ghostty/config` on macOS):
 
 ```ini
 custom-shader = /path/to/blackhole_ghostty/blackhole.glsl
-custom-shader-animation = true
+custom-shader-animation = always
 ```
+
+The checked-in shader targets this machine's Linux/OpenGL backend. On macOS,
+change `#define GHOSTTY_Y_DOWN 0` near the top of `blackhole.glsl` to `1`.
 
 Reload the config (`cmd+shift+,` on macOS) or open a new window.
 
@@ -221,45 +263,82 @@ Or just edit the constants at the top of `blackhole.glsl` and reload
 
 ### Constants
 
-At the top of `blackhole.glsl`. Radii are in Schwarzschild radii (`r_s`);
-the ISCO — the innermost stable circular orbit — is at `3 r_s`.
+At the top of `blackhole.glsl`. Radii are in Schwarzschild radii (`r_s`). The
+ISCO depends on `BH_SPIN` and is `3 r_s` only for a non-spinning hole.
 
 | Constant          | Effect                                                  |
 |-------------------|---------------------------------------------------------|
-| `HOLE_RADIUS`     | Size dial — pomodoro: shadow radius at full size (fraction of screen height); token mode: scales the area calibration (exact at 0.08) |
+| `HOLE_RADIUS`     | Size dial — pomodoro: shadow radius at full size; token mode: proportional scale for the area calibration |
 | `LENS_DEPTH`      | Distance from hole to the terminal "sky" plane, in `r_s` — bigger bends text harder |
 | `STAR_GAIN`       | Lensed starfield brightness (0 = off)                   |
-| `DISK_INNER` / `DISK_OUTER` | Disk inner/outer edge in `r_s` (inner clamps to stay outside the photon sphere) |
+| `BH_SPIN`         | Kerr spin approximation controlling frame dragging, horizon, ISCO, and orbital speed |
+| `DISK_INNER` / `DISK_OUTER` | Disk inner/outer edge in `r_s` (inner clamps to the prograde or retrograde ISCO selected by `DISK_SPEED`) |
 | `DISK_INCL`       | Disk inclination, radians: `0` face-on, `π/2` edge-on   |
 | `DISK_ROLL`       | Rotation of the whole system in the screen plane        |
+| `DISK_THICKNESS`  | Vertical disk half-height divided by radius             |
 | `DISK_GAIN`       | Disk emission brightness                                |
-| `DISK_OPACITY`    | How much the near disk hides what's behind it           |
-| `DISK_TEMP`       | Blackbody temperature of the hottest annulus, Kelvin    |
-| `DOPPLER_MIX`     | Relativistic color/brightness asymmetry: `0` off, `1` full |
-| `DISK_BEAM`       | Beaming exponent — intensity scales as `g^N`            |
+| `DISK_OPACITY`    | Optical depth through the full tapered vertical column  |
+| `DISK_TEMP`       | CIE blackbody-locus temperature of the hottest annulus, with visible-power weighting, Kelvin |
+| `DOPPLER_MIX`     | Circular-Kerr redshift/beaming strength: `0` off, `1` full |
+| `DISK_BEAM`       | Transport exponent — bolometric intensity uses physical `g⁴` |
 | `DISK_SPEED`      | Streak pattern speed; negative reverses the orbit       |
 | `DISK_WIND`       | Spiral winding tightness of the streaks                 |
 | `DISK_CONTRAST`   | Streak contrast: `0` = smooth haze, higher = sharp filaments |
+| `DISK_TURBULENCE` | Mixture of layered turbulent density into the smooth disk |
+| `DISK_FILAMENT_SHARPNESS` | Ridge exponent for hot filaments — higher = thinner, crisper streak lines |
+| `DISK_WARP_STRENGTH` | Domain-warps the turbulence field for swirling, marbled structure (0 = off) |
+| `DISK_ARM_COUNT` / `DISK_ARM_TWIST` | Number of spiral density-wave arms, and how tightly they wind per unit radius |
+| `DISK_ARM_SHARPNESS` / `DISK_ARM_STRENGTH` | Arm crest exponent (narrower = brighter) and how strongly arms modulate density |
 | `EXPOSURE`        | Tonemap exposure for disk light (text is never tonemapped) |
 | `DRIFT_SPEED`     | How fast the hole floats around                         |
 | `WORK_AREA`       | Bottom screen fraction kept completely undistorted      |
 | `DILATION_MIN`    | Disk's pattern time rate when the hole is fully grown (lower = more slowdown) |
-| `TOKEN_AREA_MIN`  | Token mode: shadow area at 0% context, as a fraction of the terminal area (default 0.06%) |
-| `TOKEN_AREA_MAX`  | Token mode: shadow area at 100% context (default ~3% of the terminal — render cost scales with it) |
+| `TOKEN_AREA_MIN`  | Token mode: base shadow area at 0% context (default 3% before the visual floor) |
+| `TOKEN_AREA_MAX`  | Token mode: shadow area at 100% context (default 50%; render cost scales with it) |
 | `TOKEN_HOME_X` / `TOKEN_HOME_Y` | Token mode: corner-home position in uv (`1,0` = exact top-right; y runs top-down) |
 | `TOKEN_EASE`      | Token mode: growth curve exponent — `1` = proportional, `<1` front-loads growth, `>1` keeps it small until late |
 | `TOKEN_REACH`     | Token mode: how much of the playable screen the roam box covers at 100% context |
 | `TOKEN_CALM` / `TOKEN_RUSH` | Token mode: drift speed at 0% / 100% context     |
+| `UNFOCUSED_EAT_SEC` | Focus-session seconds before the consume effect is fully armed |
+| `UNFOCUSED_GROW_SEC` / `UNFOCUSED_HUNGRY_GROW_SEC` | Hunger window at 0% / 100% context fill (interpolated live by fill) |
+| `UNFOCUSED_GROW_EASE` | Feed growth curve exponent — `1` = plain ease, `>1` front-loads slowness |
+| `UNFOCUSED_LEVEL`   | Disk/lens intensity while the terminal is unfocused     |
+| `UNFOCUSED_START_RADIUS` | Initial unfocused shadow radius, fraction of terminal height |
+| `UNFOCUSED_END_RADIUS` / `UNFOCUSED_HUNGRY_END_RADIUS` | Fed shadow radius cap at 0% / 100% context fill (interpolated live by fill) |
+| `UNFOCUSED_CENTER_X` / `UNFOCUSED_CENTER_Y` | Feeding center — Lissajous roam home point (y runs top-down) |
+| `UNFOCUSED_ROAM_RADIUS` / `UNFOCUSED_ROAM_SPEED` | How far and how fast the feeding center wanders from its home point |
+| `UNFOCUSED_PULL_INNER` / `UNFOCUSED_PULL_OUTER` | Eating band inner/outer edge, in shadow radii |
+| `UNFOCUSED_PULL_MIN` / `UNFOCUSED_PULL_MAX` | Inward drag fraction toward the hole at the start / end of feeding |
+| `UNFOCUSED_SWIRL_MIN` / `UNFOCUSED_SWIRL_MAX` | Spiral twist, radians, at the start / end of feeding |
 | `WORK_PERIOD_MIN` | Work minutes per pomodoro cycle (growth phase)          |
 | `BREAK_MIN`       | Break minutes per cycle (hole stays small)              |
 | `IDLE_FADE_SEC`   | Typing pause after which the hole starts to fade        |
 | `TIME_SCALE`      | Testing only: `1` = real schedule; `>1` fast-forwards growth via `iTime` |
 
-`N_STEPS` (a `#define`) sets the geodesic integration budget per pixel; only
-pixels inside the ray-traced circle around the hole pay it. It's the main
-performance dial — that circle scales with the hole, so a big hole on a big
-high-DPI display is where frames go to die. Lower `N_STEPS` (and/or
-`TOKEN_AREA_MAX`) if the terminal gets sluggish at high context fill.
+### Cinematic mode
+
+Cinematic mode is a compile-time layer selected beside `QUALITY_LEVEL` in
+`blackhole.glsl` (enabled by default). It adds geodesic-traced coronal
+emission, a structured lensed deep-space sky, optional relativistic polar
+jets, and restrained disk-only film effects. It remains one stateless fragment
+pass: terminal text, token decoding, and unfocused feeding are unchanged.
+
+| Constant | Effect |
+|---|---|
+| `CINE_SKY_GAIN` | Dust-band gain; the whole sky remains gated by `STAR_GAIN` |
+| `CINE_GLOW_GAIN` / `CINE_GLOW_RADIUS` | Optically thin coronal emission and opening |
+| `CINE_JET_GAIN` / `CINE_JET_ANGLE` / `CINE_JET_BETA` | Jet brightness, cone angle, and relativistic speed |
+| `CINE_FILM_GRAIN` | Emission-gated multiplicative grain; never lights the shadow |
+| `CINE_VIGNETTE` | Hole-centered disk vignette |
+| `CINE_RING_CA` | Optional photon-ring-only chromatic separation (off by default because gravity is achromatic) |
+| `CINE_ACES` | Selects ACES-fitted disk tonemapping when at least `0.5` |
+
+`QUALITY_LEVEL` selects `QUALITY_MAXIMUM` (128 adaptive steps, four turbulence
+octaves and 2x2 exact-shadow-edge supersampling), `QUALITY_BALANCED` (80 steps
+and two edge samples), or `QUALITY_LIGHTWEIGHT` (48 steps and one turbulence
+octave). HDR disk radiance is averaged before ACES and grain. The ray-traced
+area scales with the hole, so lower this tier or
+`TOKEN_AREA_MAX` if a large high-DPI terminal becomes sluggish.
 
 To eyeball any token level without a Claude session, drive the cursor-color
 channel by hand from a plain shell inside Ghostty: `./token-test.sh 0.42`
@@ -272,27 +351,27 @@ which is why the hold mode lingers ~1.6 s before exiting back to the prompt.
 
 For a fast debug loop, set `TIME_SCALE` to e.g. `100` to watch a complete
 pomodoro cycle — growth, collapse, break — in about 36 seconds, then set it
-back to `1`. (It fast-forwards via `iTime` rather than the wall clock, so it
-works even on builds where `iDate` is stuck at zero.) The period knobs also accept
-fractional minutes if you'd rather shorten the real schedule itself.
+back to `1`. It fast-forwards via `iTime`, including when `iTime` is already
+the fallback clock. The period knobs also accept fractional minutes.
 
 ## Uniforms Ghostty gives custom shaders (1.3)
 
 `iResolution`, `iTime`, `iTimeDelta`, `iFrameRate`, `iFrame`, `iMouse`
 (unused), `iDate` (wall clock — declared but stuck at zero through Ghostty
-1.3, see the pomodoro caveat), `iChannel0` (the terminal, `iChannel1-3`
+1.3, so pomodoro mode falls back to `iTime`), `iChannel0` (the terminal, `iChannel1-3`
 unused), `iCurrentCursor`/`iPreviousCursor` (xy position, zw size),
 `iCurrentCursorColor`/`iPreviousCursorColor`, `iCurrentCursorStyle`/
 `iPreviousCursorStyle`, `iCursorVisible`, `iTimeCursorChange`, `iFocus`,
 `iTimeFocus`, `iPalette[256]`, `iBackgroundColor`, `iForegroundColor`,
 `iCursorColor`, `iCursorText`, `iSelectionForegroundColor`,
 `iSelectionBackgroundColor`. No persistent buffers between frames — shaders
-are stateless, which is why the pomodoro is wall-clock-anchored.
+are stateless, which is why the pomodoro uses renderer-provided clocks.
 
 Three gotchas worth knowing if you hack on this:
 
-- Ghostty's `fragCoord` y-axis runs **top-down**, opposite of the Shadertoy
-  convention it otherwise follows.
+- Ghostty's native `fragCoord` y-axis is backend-dependent: **up** on
+  Linux/OpenGL and **down** on macOS/Metal. The shader normalizes its internal
+  layout to top-down. Keep `GHOSTTY_Y_DOWN 0` on Linux; set it to `1` on macOS.
 - To trigger a config reload from a script, send `SIGUSR2` — but find the
   PID with `ps`, not `pgrep`/`pkill`: those silently exclude their own
   ancestors, and Ghostty is an ancestor of any shell running inside it.
